@@ -36,7 +36,7 @@ STORE="$2"
 declare -a SLAVES=("${@:3}")
 LogMsg "slaves are: ${SLAVES}"
 teragen_records=500000000
-hadoop_version="hadoop-2.7.3"
+hadoop_version="hadoop-2.7.4"
 hadoop_store="/hadoop_store"
 hadoop_tmp="${hadoop_store}/hdfs/tmp"
 hadoop_namenode="${hadoop_store}/hdfs/namenode"
@@ -50,18 +50,26 @@ sudo rm -rf /tmp/hsperfdata*
 sudo umount -l ${hadoop_store}
 sudo rm -rf ${hadoop_store}
 
-sudo apt-get update >> ${LOG_FILE}
-sudo apt-get install -y zip maven libssl-dev build-essential rsync pkgconf cmake protobuf-compiler libprotobuf-dev default-jdk openjdk-8-jdk bc >> ${LOG_FILE}
-
-LogMsg "Upgrading procps - Azure issue."
-sudo apt-get upgrade -y procps >> ${LOG_FILE}
+distro="$(head -1 /etc/issue)"
+if [[ ${distro} == *"Ubuntu"* ]]
+then
+    sudo apt install -y zip maven libssl-dev build-essential rsync pkgconf cmake protobuf-compiler libprotobuf-dev default-jdk openjdk-8-jdk bc >> ${LOG_FILE}
+    LogMsg "Upgrading procps - Azure issue."
+    sudo apt upgrade -y procps >> ${LOG_FILE}
+elif [[ ${distro} == *"Amazon"* ]]
+then
+    sudo yum clean dbcache>> ${LOG_FILE}
+    sudo yum -y install sysstat zip java java-devel automake autoconf rsync cmake gcc libtool* protobuf-compiler bc >> ${LOG_FILE}
+else
+    LogMsg "Unsupported distribution: ${distro}."
+fi
 
 LogMsg "Setting up hadoop."
 cd /tmp
 wget http://apache.javapipe.com/hadoop/common/${hadoop_version}/${hadoop_version}.tar.gz
 tar -xzf ${hadoop_version}.tar.gz
 
-java_home=$(dirname $(dirname $(readlink -f $(which javac))))
+java_home=$(dirname $(dirname $(readlink -f $(which java))))
 
 hadoop_exports="# Hadoop exports start\n
 export JAVA_HOME=${java_home}\n
@@ -76,8 +84,10 @@ export PATH=\$PATH:\${HADOOP_HOME}/bin\n
 export PATH=\$PATH:\${HADOOP_HOME}/sbin\n
 export HADOOP_OPTS=\"-Djava.library.path=\${HADOOP_HOME}/lib\"\n
 "
+ping -c 10 ${SLAVES[0]} >> ${LOG_FILE}
 master_ip=`ip route get ${SLAVES[0]} | awk '{print $NF; exit}'`
-hostname=`hostname -f`
+hostname=`hostname`
+echo -e ${master_ip} ${hostname} | sudo tee --append /etc/hosts
 
 grep -q "Hadoop exports start" ~/.bashrc
 if [ $? -ne 0 ]; then
@@ -97,7 +107,6 @@ mkdir -p /tmp/terasort
 
 LogMsg "Updating hadoop-env.sh"
 sed -i "s~export JAVA_HOME=\${JAVA_HOME}~export JAVA_HOME=${java_home}~g" ${hadoop_conf}/hadoop-env.sh
-
 LogMsg "Updating core-site.xml"
 sed -i "s~</configuration>~    <property>~g" ${hadoop_conf}/core-site.xml
 echo "        <name>fs.default.name</name>" >> ${hadoop_conf}/core-site.xml
@@ -108,7 +117,6 @@ echo "        <name>hadoop.tmp.dir</name>" >> ${hadoop_conf}/core-site.xml
 echo "        <value>${hadoop_tmp}</value>" >> ${hadoop_conf}/core-site.xml
 echo "    </property>" >> ${hadoop_conf}/core-site.xml
 echo "</configuration>" >> ${hadoop_conf}/core-site.xml
-
 LogMsg "Updating hdfs-site.xml"
 sed -i "s~</configuration>~    <property>~g" ${hadoop_conf}/hdfs-site.xml
 echo "        <name>dfs.replication</name>" >> ${hadoop_conf}/hdfs-site.xml
@@ -127,7 +135,6 @@ echo "        <name>dfs.permissions</name>" >> ${hadoop_conf}/hdfs-site.xml
 echo "        <value>false</value>" >> ${hadoop_conf}/hdfs-site.xml
 echo "    </property>" >> ${hadoop_conf}/hdfs-site.xml
 echo "</configuration>" >> ${hadoop_conf}/hdfs-site.xml
-
 LogMsg "Updating yarn-site.xml"
 sed -i "s~</configuration>~    <property>~g" ${hadoop_conf}/yarn-site.xml
 echo "        <name>yarn.nodemanager.aux-services</name>" >> ${hadoop_conf}/yarn-site.xml
@@ -138,7 +145,6 @@ echo "        <name>yarn.nodemanager.aux-services.mapreduce.shuffle.class</name>
 echo "        <value>org.apache.hadoop.mapred.ShuffleHandler</value>" >> ${hadoop_conf}/yarn-site.xml
 echo "    </property>" >> ${hadoop_conf}/yarn-site.xml
 echo "</configuration>" >> ${hadoop_conf}/yarn-site.xml
-
 LogMsg "Creating and updating mapred-site.xml"
 cp ${hadoop_conf}/mapred-site.xml.template ${hadoop_conf}/mapred-site.xml
 sed -i "s~</configuration>~    <property>~g" ${hadoop_conf}/mapred-site.xml
@@ -162,20 +168,27 @@ do
     ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo umount -l ${hadoop_store}" >> ${LOG_FILE}
     ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo rm -rf ${hadoop_store}" >> ${LOG_FILE}
     LogMsg "Configuring hadoop on: ${slave}"
-    ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo apt-get update" >> ${LOG_FILE}
-    ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo apt-get install -y maven libssl-dev rsync build-essential pkgconf cmake protobuf-compiler libprotobuf-dev default-jdk openjdk-8-jdk bc" >> ${LOG_FILE}
-    ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo apt-get upgrade -y procps" >> ${LOG_FILE}
+    if [[ ${distro} == *"Ubuntu"* ]]
+    then
+        ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo apt update" >> ${LOG_FILE}
+        ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo apt install -y maven libssl-dev rsync build-essential pkgconf cmake protobuf-compiler libprotobuf-dev default-jdk openjdk-8-jdk bc" >> ${LOG_FILE}
+        ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo apt upgrade -y procps" >> ${LOG_FILE}
+    elif [[ ${distro} == *"Amazon"* ]]
+    then
+        ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo yum clean dbcache" >> ${LOG_FILE}
+        ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo yum -y install sysstat zip java java-devel automake autoconf rsync cmake gcc libtool* protobuf-compiler bc" >> ${LOG_FILE}
+    else
+        LogMsg "Unsupported distribution: ${distro}."
+    fi
     scp -o StrictHostKeyChecking=no /tmp/${hadoop_version}.tar.gz ${USER}@${slave}:/tmp >> ${LOG_FILE}
     ssh -o StrictHostKeyChecking=no ${USER}@${slave} "cd /tmp;tar -xzf ${hadoop_version}.tar.gz" >> ${LOG_FILE}
     ssh -o StrictHostKeyChecking=no ${USER}@${slave} "echo -e '${hadoop_exports}' >> ~/.bashrc" >> ${LOG_FILE}
-
     LogMsg "Copying hadoop conf files on: ${slave}"
     scp -o StrictHostKeyChecking=no ${hadoop_conf}/hadoop-env.sh ${hadoop_conf}/core-site.xml ${hadoop_conf}/hdfs-site.xml ${hadoop_conf}/mapred-site.xml ${USER}@${slave}:${hadoop_conf}/
     ssh -o StrictHostKeyChecking=no ${USER}@${slave} "echo -e '${master_ip}' >> ${hadoop_conf}/masters" >> ${LOG_FILE}
     ssh -o StrictHostKeyChecking=no ${USER}@${slave} "echo -e '${slave}' > ${hadoop_conf}/slaves" >> ${LOG_FILE}
     ssh -o StrictHostKeyChecking=no ${USER}@${slave} "echo -e > /home/${USER}/.ssh/known_hosts" >> ${LOG_FILE}
     echo -e ${slave} >> ${hadoop_conf}/slaves
-
     LogMsg "Setting up hadoop store ${hadoop_store} on ${slave}"
     ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo mkfs.ext4 ${STORE}" >> ${LOG_FILE}
     ssh -T -o StrictHostKeyChecking=no ${USER}@${slave} "sudo mkdir -p ${hadoop_store}" >> ${LOG_FILE}
@@ -204,7 +217,9 @@ sleep 10
 # c4.large = 1.75 * 4 * 2 = 14
 /tmp/${hadoop_version}/bin/hadoop jar /tmp/${hadoop_version}/share/hadoop/mapreduce/hadoop-*examples*.jar terasort -Dmapreduce.job.reduces=112 ${hadoop_store}/genout ${hadoop_store}/sortout 2&> /tmp/terasort/terasort.log
 
-LogMsg "Kernel Version : `uname -r` "
+LogMsg "Kernel Version : `uname -r`"
+LogMsg "Guest OS : ${distro}"
+LogMsg "Hadoop Version : ${hadoop_version}"
 
 cd /tmp
 zip -r terasort.zip . -i terasort/* >> ${LOG_FILE}

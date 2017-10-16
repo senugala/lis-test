@@ -93,12 +93,12 @@ if (-not $testParams)
   return $false
 }
 
-[string]$tPvmName = $null
 $tpEnabled = $null
 [int64]$tPminMem = 0
 [int64]$tPmaxMem = 0
 [int64]$tPstartupMem = 0
 [int64]$tPmemWeight = -1
+$bootLargeMem = $false
 
 # Source TCUtils.ps1
 if (Test-Path ".\setupScripts\TCUtils.ps1") {
@@ -124,24 +124,12 @@ foreach ($p in $params)
         continue
     }
 
-    $vm = $null
-
     if ($temp[0].Trim() -eq "vmName")
     {
-        $tPvmName = $temp[1]
-
-        $vm = Get-VM -Name $tPvmName -ComputerName $hvServer -ErrorAction SilentlyContinue
-
-        if (-not $vm)
-        {
-            "Error: VM ${tPvmName} does not exist"
-            return $False
-        }
-
-        "vmName: $tPvmName"
-
+       $vmName = $temp[1]
     }
-    elseif($temp[0].Trim() -eq "enableDM")
+
+    if($temp[0].Trim() -eq "enableDM")
     {
 
       if ($temp[1].Trim() -ilike "yes")
@@ -156,6 +144,17 @@ foreach ($p in $params)
       "dm enabled: $tpEnabled"
 
     }
+
+	elseif ($temp[0].Trim() -eq "bootLargeMem")
+	{
+		if ($temp[1].Trim() -ilike "yes")
+		{
+		  $bootLargeMem = $true
+		}
+
+    "BootLargeMemory: $bootLargeMem"
+	}
+
     elseif($temp[0].Trim() -eq "minMem")
     {
 
@@ -173,6 +172,7 @@ foreach ($p in $params)
 
     elseif($temp[0].Trim() -eq "maxMem")
     {
+      $maxMem_xmlValue = $temp[1].Trim()
       $tPmaxMem = ConvertToMemSize $temp[1].Trim() $hvServer
 
       if ($tPmaxMem -le 0)
@@ -182,12 +182,11 @@ foreach ($p in $params)
       }
 
       "maxMem: $tPmaxMem"
-
     }
 
     elseif($temp[0].Trim() -eq "startupMem")
     {
-
+      $startupMem_xmlValue = $temp[1].Trim()
       $tPstartupMem = ConvertToMemSize $temp[1].Trim() $hvServer
 
       if ($tPstartupMem -le 0)
@@ -197,7 +196,6 @@ foreach ($p in $params)
       }
 
       "startupMem: $tPstartupMem"
-
     }
 
     elseif($temp[0].Trim() -eq "memWeight")
@@ -211,31 +209,31 @@ foreach ($p in $params)
       }
 
       "memWeight: $tPmemWeight"
- }
-
+	  }
+ 
     # check if we have all variables set
-    if ( $tPvmName -and ($tpEnabled -eq $false -or $tpEnabled -eq $true) -and $tPstartupMem -and ([int64]$tPmemWeight -ge [int64]0) )
+    if ( $vmName -and ($tpEnabled -eq $false -or $tpEnabled -eq $true) -and $tPstartupMem -and ([int64]$tPmemWeight -ge [int64]0) )
     {
       # make sure VM is off
-      if (Get-VM -Name $tPvmName -ComputerName $hvServer |  Where { $_.State -like "Running" })
+      if (Get-VM -Name $vmName -ComputerName $hvServer |  Where { $_.State -like "Running" })
       {
 
-        "Stopping VM $tPvmName"
-        Stop-VM -Name $tPvmName -ComputerName $hvServer -force
+        "Stopping VM $vmName"
+        Stop-VM -Name $vmName -ComputerName $hvServer -force
 
         if (-not $?)
         {
-          "Error: Unable to shut $tPvmName down (in order to set Memory parameters)"
+          "Error: Unable to shut $vmName down (in order to set Memory parameters)"
           return $false
         }
 
         # wait for VM to finish shutting down
         $timeout = 30
-        while (Get-VM -Name $tPvmName -ComputerName $hvServer |  Where { $_.State -notlike "Off" })
+        while (Get-VM -Name $vmName -ComputerName $hvServer |  Where { $_.State -notlike "Off" })
         {
           if ($timeout -le 0)
           {
-            "Error: Unable to shutdown $tPvmName"
+            "Error: Unable to shutdown $vmName"
             return $false
           }
 
@@ -245,21 +243,34 @@ foreach ($p in $params)
 
       }
 
-      if ($tpEnabled)
+	  if ($bootLargeMem) {
+		$osInfo = Get-WMIObject Win32_OperatingSystem -ComputerName $hvServer
+		$freeMem = $OSInfo.FreePhysicalMemory * 1KB
+		if ($tPstartupMem -le $freeMem) {
+		  Set-VMMemory -vmName $vmName -ComputerName $hvServer -DynamicMemoryEnabled $false -StartupBytes $tPstartupMem
+		} else {
+		  "Error: Insufficient memory to run test. Skipping test."
+			return $Skipped
+		}
+	  } elseif ($tpEnabled)
       {
-        Set-VMMemory -vmName $tPvmName -ComputerName $hvServer -DynamicMemoryEnabled $tpEnabled `
+        if ($maxMem_xmlValue -eq $startupMem_xmlValue) 
+        {
+          $tPstartupMem = $tPmaxMem
+        }
+        Set-VMMemory -vmName $vmName -ComputerName $hvServer -DynamicMemoryEnabled $tpEnabled `
                       -MinimumBytes $tPminMem -MaximumBytes $tPmaxMem -StartupBytes $tPstartupMem `
                       -Priority $tPmemWeight
       }
       else
       {
-          Set-VMMemory -vmName $tPvmName -ComputerName $hvServer -DynamicMemoryEnabled $tpEnabled `
+          Set-VMMemory -vmName $vmName -ComputerName $hvServer -DynamicMemoryEnabled $tpEnabled `
                     -StartupBytes $tPstartupMem -Priority $tPmemWeight
       }
-      
+
       if (-not $?)
       {
-        "Error: Unable to set VM Memory for $tPvmName."
+        "Error: Unable to set VM Memory for $vmName."
         "DM enabled: $tpEnabled"
         "min Mem: $tPminMem"
         "max Mem: $tPmaxMem"
@@ -268,8 +279,19 @@ foreach ($p in $params)
         return $false
       }
 
+      # check if mem is set correctly
+      $vm_mem = (Get-VMMemory $vmName -ComputerName $hvServer).Startup
+      if( $vm_mem -eq $tPstartupMem )
+      {
+          "Set VM Startup Memory for $vmName to $tPstartupMem"
+      }
+      else
+      {
+          "Error : Unable to set VM Startup Memory for $vmName to $tPstartupMem"
+          return $false
+      }
+
       # reset all variables
-      [string]$tPvmName = $null
       $tpEnabled = $null
       [int64]$tPminMem = 0
       [int64]$tPmaxMem = 0

@@ -125,10 +125,22 @@ $summaryLog  = "${vmName}_summary.log"
 Del $summaryLog -ErrorAction SilentlyContinue
 echo "Covers : ${tcCovered}" >> $summaryLog
 
-#
-# Source the TCUtils.ps1 file
-#
-. .\setupscripts\TCUtils.ps1
+# Source TCUtils.ps1
+if (Test-Path ".\setupScripts\TCUtils.ps1") {
+    . .\setupScripts\TCUtils.ps1
+} else {
+    "Error: Could not find setupScripts\TCUtils.ps1"
+}
+
+# if host build number lower than 9600, skip test
+$BuildNumber = GetHostBuildNumber $hvServer
+if ($BuildNumber -eq 0) {
+    return $False
+}
+elseif ($BuildNumber -lt 9600) {
+	"Info: Feature supported only on WS2012R2 and newer"
+    return $Skipped
+}
 
 #
 # Ensure required parameters were specified
@@ -177,6 +189,9 @@ if (-not $sts) {
 }
 
 Start-Sleep -S 9
+
+# enable the sysrq handle
+.\bin\plink.exe -i ssh\${sshKey} root@${ipv4} "sysctl -w kernel.sysrq=1"
 
 #
 # Note the current time, then panic the VM
